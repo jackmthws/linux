@@ -625,5 +625,6 @@ int mt7663u_mcu_power_on(struct mt7615_dev *dev);
 
 /* sdio */
 int mt7663s_mcu_init(struct mt7615_dev *dev);
+void mt7668s_mcu_power_off(struct mt7615_dev *dev);
 
 #endif

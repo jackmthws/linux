@@ -21,6 +21,7 @@
 
 static const struct sdio_device_id mt7663s_table[] = {
 	{ SDIO_DEVICE(SDIO_VENDOR_ID_MEDIATEK, 0x7603) },
+	{ SDIO_DEVICE(SDIO_VENDOR_ID_MEDIATEK, 0x7608) },
 	{ }	/* Terminating entry */
 };
 
@@ -44,7 +45,8 @@ static void mt7663s_init_work(struct work_struct *work)
 	struct mt7615_dev *dev;
 
 	dev = container_of(work, struct mt7615_dev, mcu_work);
-	if (mt7663s_mcu_init(dev))
+	if (!test_bit(MT76_STATE_MCU_RUNNING, &dev->mphy.state) &&
+	    mt7663s_mcu_init(dev))
 		return;
 
 	mt7615_init_work(dev);
@@ -109,6 +111,9 @@ static int mt7663s_probe(struct sdio_func *func,
 	if (!ops)
 		return -ENOMEM;
 
+	if (id->device == 0x7608)
+		mt7668_init_ops(ops);
+
 	mdev = mt76_alloc_device(&func->dev, sizeof(*dev), ops, &drv_ops);
 	if (!mdev)
 		return -ENOMEM;
@@ -116,6 +121,8 @@ static int mt7663s_probe(struct sdio_func *func,
 	dev = container_of(mdev, struct mt7615_dev, mt76);
 
 	INIT_WORK(&dev->mcu_work, mt7663s_init_work);
+	if (id->device == 0x7608)
+		dev->early_mcu_init = mt7663s_mcu_init;
 	dev->reg_map = mt7663_usb_sdio_reg_map;
 	dev->ops = ops;
 	sdio_set_drvdata(func, dev);
@@ -124,7 +131,8 @@ static int mt7663s_probe(struct sdio_func *func,
 	if (ret < 0)
 		goto error;
 
-	ret = mt76s_hw_init(mdev, func, MT76_CONNAC_SDIO);
+	ret = mt76s_hw_init(mdev, func, id->device == 0x7608 ?
+			    MT76_MT7668_SDIO : MT76_CONNAC_SDIO);
 	if (ret)
 		goto error;
 
@@ -144,6 +152,13 @@ static int mt7663s_probe(struct sdio_func *func,
 	ret = mt76s_alloc_rx_queue(mdev, MT_RXQ_MAIN);
 	if (ret)
 		goto error;
+
+	if (is_mt7668(mdev)) {
+		/* MT7668 delivers frames on both SDIO rx ports */
+		ret = mt76s_alloc_rx_queue(mdev, MT_RXQ_MCU);
+		if (ret)
+			goto error;
+	}
 
 	ret = mt76s_alloc_tx(mdev);
 	if (ret)
@@ -177,6 +192,8 @@ static void mt7663s_remove(struct sdio_func *func)
 		return;
 
 	ieee80211_unregister_hw(dev->mt76.hw);
+	if (is_mt7668(&dev->mt76))
+		mt7668s_mcu_power_off(dev);
 	mt76s_deinit(&dev->mt76);
 	mt76_free_device(&dev->mt76);
 }
@@ -240,6 +257,9 @@ MODULE_FIRMWARE(MT7663_OFFLOAD_FIRMWARE_N9);
 MODULE_FIRMWARE(MT7663_OFFLOAD_ROM_PATCH);
 MODULE_FIRMWARE(MT7663_FIRMWARE_N9);
 MODULE_FIRMWARE(MT7663_ROM_PATCH);
+MODULE_FIRMWARE(MT7668_FIRMWARE_N9);
+MODULE_FIRMWARE(MT7668_FIRMWARE_CR4);
+MODULE_FIRMWARE(MT7668_ROM_PATCH);
 
 static DEFINE_SIMPLE_DEV_PM_OPS(mt7663s_pm_ops, mt7663s_suspend, mt7663s_resume);
 
