@@ -259,7 +259,7 @@ int mt76s_hw_init(struct mt76_dev *dev, struct sdio_func *func, int hw_ver)
 		goto disable_func;
 
 	ctrl = WHIER_RX0_DONE_INT_EN | WHIER_TX_DONE_INT_EN;
-	if (hw_ver == MT76_CONNAC2_SDIO)
+	if (hw_ver != MT76_CONNAC_SDIO)
 		ctrl |= WHIER_RX1_DONE_INT_EN;
 	sdio_writel(func, ctrl, MCR_WHIER, &ret);
 	if (ret < 0)
@@ -267,6 +267,7 @@ int mt76s_hw_init(struct mt76_dev *dev, struct sdio_func *func, int hw_ver)
 
 	switch (hw_ver) {
 	case MT76_CONNAC_SDIO:
+	case MT76_MT7668_SDIO:
 		/* set WHISR as read clear and Rx aggregation number as 16 */
 		ctrl = FIELD_PREP(MAX_HIF_RX_LEN_NUM, 16);
 		break;

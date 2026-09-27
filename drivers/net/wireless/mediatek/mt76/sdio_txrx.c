@@ -18,6 +18,33 @@
 #include "sdio.h"
 #include "mt76.h"
 
+static int mt7668s_refill_sched_quota(struct mt76_dev *dev, u32 *data)
+{
+	struct mt76_sdio *sdio = &dev->sdio;
+	u32 data_quota = 0, mcu_quota;
+	int i;
+
+	/* TQ0-TQ11: AC0-AC3 of the three WMM sets, TQ15: MCU (CPU) queue.
+	 * Resources are counted in frames.
+	 */
+	for (i = 0; i < 6; i++)
+		data_quota += FIELD_GET(TXQ_CNT_L, data[i]) +
+			      FIELD_GET(TXQ_CNT_H, data[i]);
+	mcu_quota = FIELD_GET(TXQ_CNT_H, data[7]);
+
+	if (!data_quota && !mcu_quota)
+		return 0;
+
+	sdio->sched.pse_mcu_quota += mcu_quota;
+	if (sdio->pse_mcu_quota_max &&
+	    sdio->sched.pse_mcu_quota > sdio->pse_mcu_quota_max)
+		sdio->sched.pse_mcu_quota = sdio->pse_mcu_quota_max;
+	sdio->sched.pse_data_quota += data_quota;
+	sdio->sched.ple_data_quota += data_quota;
+
+	return data_quota + mcu_quota;
+}
+
 static int mt76s_refill_sched_quota(struct mt76_dev *dev, u32 *data)
 {
 	u32 ple_ac_data_quota[] = {
@@ -36,6 +63,9 @@ static int mt76s_refill_sched_quota(struct mt76_dev *dev, u32 *data)
 	u32 pse_data_quota = 0, ple_data_quota = 0;
 	struct mt76_sdio *sdio = &dev->sdio;
 	int i;
+
+	if (sdio->hw_ver == MT76_MT7668_SDIO)
+		return mt7668s_refill_sched_quota(dev, data);
 
 	for (i = 0; i < ARRAY_SIZE(pse_ac_data_quota); i++) {
 		pse_data_quota += pse_ac_data_quota[i];
@@ -195,6 +225,8 @@ mt76s_tx_pick_quota(struct mt76_sdio *sdio, bool mcu, int buf_sz,
 
 	if (mcu && sdio->hw_ver == MT76_CONNAC2_SDIO)
 		pse_sz = 1;
+	else if (sdio->hw_ver == MT76_MT7668_SDIO)
+		pse_sz = 1;
 
 	if (mcu) {
 		if (sdio->sched.pse_mcu_quota < *pse_size + pse_sz)
@@ -209,6 +241,13 @@ mt76s_tx_pick_quota(struct mt76_sdio *sdio, bool mcu, int buf_sz,
 	*pse_size = *pse_size + pse_sz;
 
 	return 0;
+}
+
+static bool mt76s_tx_to_mcu_port(struct mt76_sdio *sdio, struct sk_buff *skb)
+{
+	/* TXD dword 0 bit 31 selects the MCU port */
+	return sdio->hw_ver == MT76_MT7668_SDIO &&
+	       (get_unaligned_le32(skb->data) & BIT(31));
 }
 
 static void
@@ -244,7 +283,7 @@ static int __mt76s_xmit_queue(struct mt76_dev *dev, u8 *data, int len)
 
 static int mt76s_tx_run_queue(struct mt76_dev *dev, struct mt76_queue *q)
 {
-	int err, nframes = 0, len = 0, pse_sz = 0, ple_sz = 0;
+	int err, nframes = 0, len = 0, pse_sz = 0, ple_sz = 0, fw_sz = 0;
 	bool mcu = q == dev->q_mcu[MT_MCUQ_WM];
 	struct mt76_sdio *sdio = &dev->sdio;
 	u8 pad;
@@ -276,9 +315,15 @@ static int mt76s_tx_run_queue(struct mt76_dev *dev, struct mt76_queue *q)
 		if (len + e->skb->len + pad + 4 > dev->sdio.xmit_buf_sz)
 			break;
 
-		if (mt76s_tx_pick_quota(sdio, mcu, e->buf_sz, &pse_sz,
-					&ple_sz))
+		if (!mcu && mt76s_tx_to_mcu_port(sdio, e->skb)) {
+			/* MT7668 management frames use the MCU resources */
+			if (mt76s_tx_pick_quota(sdio, true, e->buf_sz, &fw_sz,
+						&ple_sz))
+				break;
+		} else if (mt76s_tx_pick_quota(sdio, mcu, e->buf_sz, &pse_sz,
+					       &ple_sz)) {
 			break;
+		}
 
 		memcpy(sdio->xmit_buf + len, e->skb->data, skb_headlen(e->skb));
 		len += skb_headlen(e->skb);
@@ -306,6 +351,8 @@ next:
 			return err;
 	}
 	mt76s_tx_update_quota(sdio, mcu, pse_sz, ple_sz);
+	if (fw_sz)
+		mt76s_tx_update_quota(sdio, true, fw_sz, 0);
 
 	mt76_worker_schedule(&sdio->status_worker);
 

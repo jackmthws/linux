@@ -10,6 +10,7 @@
 #define MT_PSE_PAGE_SZ			128
 
 #define MCR_WCIR			0x0000
+#define WCIR_WLAN_READY			BIT(21)
 #define MCR_WHLPCR			0x0004
 #define WHLPCR_FW_OWN_REQ_CLR		BIT(9)
 #define WHLPCR_FW_OWN_REQ_SET		BIT(8)
@@ -123,6 +124,7 @@
 enum mt76_connac_sdio_ver {
 	MT76_CONNAC_SDIO,
 	MT76_CONNAC2_SDIO,
+	MT76_MT7668_SDIO,
 };
 
 struct mt76s_intr {
