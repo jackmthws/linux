@@ -114,7 +114,8 @@ void mt7615_mcu_fill_msg(struct mt7615_dev *dev, struct sk_buff *skb,
 	mcu_txd = (struct mt7615_mcu_txd *)txd;
 	mcu_txd->len = cpu_to_le16(skb->len - sizeof(mcu_txd->txd));
 	mcu_txd->pq_id = cpu_to_le16(MCU_PQ_ID(MT_TX_PORT_IDX_MCU, q_idx));
-	mcu_txd->s2d_index = MCU_S2D_H2N;
+	/* the MT7668 CR4 has to track the same state as the N9 */
+	mcu_txd->s2d_index = is_mt7668(&dev->mt76) ? MCU_S2D_H2CN : MCU_S2D_H2N;
 	mcu_txd->pkt_type = MCU_PKT_ID;
 	mcu_txd->seq = seq;
 	mcu_txd->cid = mcu_cmd;
@@ -1224,6 +1225,17 @@ int mt7615_mcu_restart(struct mt76_dev *dev)
 }
 EXPORT_SYMBOL_GPL(mt7615_mcu_restart);
 
+static int mt7615_mcu_send_scatter(struct mt7615_dev *dev, const void *data,
+				   int len)
+{
+	/* the MT7668 ROM accepts at most 2KB of payload per scatter command */
+	int max_len = is_mt7668(&dev->mt76) ? 2048 :
+		      4096 - dev->mt76.mcu_ops->headroom;
+
+	return __mt76_mcu_send_firmware(&dev->mt76, MCU_CMD(FW_SCATTER), data,
+					len, max_len);
+}
+
 static int mt7615_load_patch(struct mt7615_dev *dev, u32 addr, const char *name)
 {
 	const struct mt7615_patch_hdr *hdr;
@@ -1266,8 +1278,7 @@ static int mt7615_load_patch(struct mt7615_dev *dev, u32 addr, const char *name)
 		goto out;
 	}
 
-	ret = mt76_mcu_send_firmware(&dev->mt76, MCU_CMD(FW_SCATTER),
-				     fw->data + sizeof(*hdr), len);
+	ret = mt7615_mcu_send_scatter(dev, fw->data + sizeof(*hdr), len);
 	if (ret) {
 		dev_err(dev->mt76.dev, "Failed to send firmware to device\n");
 		goto out;
@@ -1294,12 +1305,18 @@ release_fw:
 	return ret;
 }
 
+static int mt7615_cr4_region_num(struct mt7615_dev *dev)
+{
+	/* the MT7668 CR4 image carries separate ILM and DLM regions */
+	return is_mt7668(&dev->mt76) ? 2 : CR4_REGION_NUM;
+}
+
 static int
 mt7615_mcu_send_ram_firmware(struct mt7615_dev *dev,
 			     const struct mt7615_fw_trailer *hdr,
 			     const u8 *data, bool is_cr4)
 {
-	int n_region = is_cr4 ? CR4_REGION_NUM : N9_REGION_NUM;
+	int n_region = is_cr4 ? mt7615_cr4_region_num(dev) : N9_REGION_NUM;
 	int err, i, offset = 0;
 	u32 len, addr, mode;
 
@@ -1316,8 +1333,7 @@ mt7615_mcu_send_ram_firmware(struct mt7615_dev *dev,
 			return err;
 		}
 
-		err = mt76_mcu_send_firmware(&dev->mt76, MCU_CMD(FW_SCATTER),
-					     data + offset, len);
+		err = mt7615_mcu_send_scatter(dev, data + offset, len);
 		if (err) {
 			dev_err(dev->mt76.dev, "Failed to send firmware to device\n");
 			return err;
@@ -1355,9 +1371,12 @@ static int mt7615_load_n9(struct mt7615_dev *dev, const char *name)
 	if (ret)
 		goto out;
 
-	ret = mt76_connac_mcu_start_firmware(&dev->mt76,
-					     le32_to_cpu(hdr->addr),
-					     FW_START_OVERRIDE);
+	if (is_mt7668(&dev->mt76))
+		ret = mt76_connac_mcu_start_firmware(&dev->mt76, 0, 0);
+	else
+		ret = mt76_connac_mcu_start_firmware(&dev->mt76,
+						     le32_to_cpu(hdr->addr),
+						     FW_START_OVERRIDE);
 	if (ret) {
 		dev_err(dev->mt76.dev, "Failed to start N9 firmware\n");
 		goto out;
@@ -1390,14 +1409,15 @@ static int mt7615_load_cr4(struct mt7615_dev *dev, const char *name)
 	if (ret)
 		return ret;
 
-	if (!fw || !fw->data || fw->size < CR4_REGION_NUM * sizeof(*hdr)) {
+	if (!fw || !fw->data ||
+	    fw->size < mt7615_cr4_region_num(dev) * sizeof(*hdr)) {
 		dev_err(dev->mt76.dev, "Invalid firmware\n");
 		ret = -EINVAL;
 		goto out;
 	}
 
 	hdr = (const struct mt7615_fw_trailer *)(fw->data + fw->size -
-					CR4_REGION_NUM * sizeof(*hdr));
+					mt7615_cr4_region_num(dev) * sizeof(*hdr));
 
 	dev_info(dev->mt76.dev, "CR4 Firmware Version: %.10s, Build Time: %.15s\n",
 		 hdr->fw_ver, hdr->build_date);
@@ -1429,6 +1449,29 @@ static int mt7615_load_ram(struct mt7615_dev *dev)
 
 	return mt7615_load_cr4(dev, MT7615_FIRMWARE_CR4);
 }
+
+int mt7668_load_firmware(struct mt7615_dev *dev)
+{
+	int ret;
+
+	ret = mt7615_load_patch(dev, MT7668_PATCH_ADDRESS, MT7668_ROM_PATCH);
+	if (ret)
+		return ret;
+
+	ret = mt7615_load_n9(dev, MT7668_FIRMWARE_N9);
+	if (ret)
+		return ret;
+
+	ret = mt7615_load_cr4(dev, MT7668_FIRMWARE_CR4);
+	if (ret)
+		return ret;
+
+	/* the MT7668 STA firmware offloads scan, roc and power save */
+	dev->fw_ver = MT7615_FIRMWARE_V3;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(mt7668_load_firmware);
 
 static int mt7615_load_firmware(struct mt7615_dev *dev)
 {
@@ -1744,6 +1787,37 @@ void mt7615_mcu_exit(struct mt7615_dev *dev)
 }
 EXPORT_SYMBOL_GPL(mt7615_mcu_exit);
 
+static int mt7668_mcu_set_eeprom(struct mt7615_dev *dev)
+{
+	struct {
+		u8 source_mode;
+		u8 count;
+		u8 cmd_type;
+		u8 rsv;
+	} __packed req_hdr = {
+		/* let the firmware use the calibration data in efuse */
+		.source_mode = 0,
+		.count = 0xff,
+		.cmd_type = 1 | FIELD_PREP(GENMASK(7, 4), 1),
+	};
+	u16 start = dev->ee_buf_start, len = dev->ee_buf_len;
+	struct sk_buff *skb;
+
+	if (!len || len > MT7668_EE_BUF_MAX ||
+	    start + len > dev->mt76.eeprom.size)
+		return -EINVAL;
+
+	skb = mt76_mcu_msg_alloc(&dev->mt76, NULL, sizeof(req_hdr) + len);
+	if (!skb)
+		return -ENOMEM;
+
+	skb_put_data(skb, &req_hdr, sizeof(req_hdr));
+	skb_put_data(skb, (u8 *)dev->mt76.eeprom.data + start, len);
+
+	return mt76_mcu_skb_send_msg(&dev->mt76, skb,
+				     MCU_EXT_QUERY(EFUSE_BUFFER_MODE), true);
+}
+
 int mt7615_mcu_set_eeprom(struct mt7615_dev *dev)
 {
 	struct {
@@ -1756,6 +1830,9 @@ int mt7615_mcu_set_eeprom(struct mt7615_dev *dev)
 	u8 *eep = (u8 *)dev->mt76.eeprom.data;
 	struct sk_buff *skb;
 	int eep_len, offset;
+
+	if (is_mt7668(&dev->mt76))
+		return mt7668_mcu_set_eeprom(dev);
 
 	switch (mt76_chip(&dev->mt76)) {
 	case 0x7622:

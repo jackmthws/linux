@@ -51,6 +51,15 @@
 #define MT7663_ROM_PATCH		"mediatek/mt7663pr2h_rebb.bin"
 #define MT7663_FIRMWARE_N9		"mediatek/mt7663_n9_rebb.bin"
 
+/* shared with the Bluetooth function (btmtksdio), which loads it too */
+#define MT7668_ROM_PATCH		"mediatek/mt7668pr2h.bin"
+#define MT7668_FIRMWARE_N9		"mediatek/mt7668_n9.bin"
+#define MT7668_FIRMWARE_CR4		"mediatek/mt7668_cr4.bin"
+
+#define MT7668_PATCH_ADDRESS		0xc8000
+
+#define MT7668_EE_BUF_MAX		1200
+
 #define MT7615_EEPROM_SIZE		1024
 #define MT7663_EEPROM_SIZE		1536
 #define MT7615_TOKEN_SIZE		4096
@@ -276,6 +285,13 @@ struct mt7615_dev {
 
 	u8 fw_ver;
 
+	/* MT7668: capabilities live in efuse, which needs the firmware */
+	int (*early_mcu_init)(struct mt7615_dev *dev);
+
+	/* MT7668 efuse buffer mode window reported by the firmware */
+	u16 ee_buf_start;
+	u16 ee_buf_len;
+
 	struct work_struct rate_work;
 	struct list_head wrd_head;
 
@@ -351,6 +367,9 @@ mt7615_ext_phy(struct mt7615_dev *dev)
 
 extern struct ieee80211_rate mt7615_rates[12];
 extern const struct ieee80211_ops mt7615_ops;
+int mt7668_mcu_efuse_read(struct mt7615_dev *dev, u32 offset, u8 *data);
+int mt7668_mcu_basic_config(struct mt7615_dev *dev);
+int mt7668_mcu_power_off(struct mt7615_dev *dev);
 extern const u32 mt7615e_reg_map[__MT_BASE_MAX];
 extern const u32 mt7663e_reg_map[__MT_BASE_MAX];
 extern const u32 mt7663_usb_sdio_reg_map[__MT_BASE_MAX];
@@ -414,7 +433,8 @@ static inline bool mt7615_firmware_offload(struct mt7615_dev *dev)
 
 static inline u16 mt7615_wtbl_size(struct mt7615_dev *dev)
 {
-	if (is_mt7663(&dev->mt76) && mt7615_firmware_offload(dev))
+	if ((is_mt7663(&dev->mt76) && mt7615_firmware_offload(dev)) ||
+	    is_mt7668(&dev->mt76))
 		return MT7663_WTBL_SIZE;
 	else
 		return MT7615_WTBL_SIZE;
@@ -535,6 +555,7 @@ int mt7615_mac_set_beacon_filter(struct mt7615_phy *phy,
 int mt7615_mcu_set_bss_pm(struct mt7615_dev *dev, struct ieee80211_vif *vif,
 			  bool enable);
 int __mt7663_load_firmware(struct mt7615_dev *dev);
+int mt7668_load_firmware(struct mt7615_dev *dev);
 void mt7615_coredump_work(struct work_struct *work);
 
 void mt7622_trigger_hif_int(struct mt7615_dev *dev, bool en);

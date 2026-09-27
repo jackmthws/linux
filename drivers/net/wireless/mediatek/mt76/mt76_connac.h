@@ -263,6 +263,11 @@ static inline bool is_mt799x(struct mt76_dev *dev)
 	return is_mt7996(dev) || is_mt7992(dev) || is_mt7990(dev);
 }
 
+static inline bool is_mt7668(struct mt76_dev *dev)
+{
+	return mt76_chip(dev) == 0x7668;
+}
+
 static inline bool is_mt7622(struct mt76_dev *dev)
 {
 	if (!IS_ENABLED(CONFIG_MT7622_WMAC))

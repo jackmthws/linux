@@ -319,9 +319,12 @@ EXPORT_SYMBOL_GPL(mt7615_init_txpower);
 void mt7615_init_work(struct mt7615_dev *dev)
 {
 	mt7615_mcu_set_eeprom(dev);
-	mt7615_mac_init(dev);
-	mt7615_phy_init(dev);
-	mt76_connac_mcu_del_wtbl_all(&dev->mt76);
+	/* the MT7668 firmware owns MAC/PHY setup and the WTBL */
+	if (!is_mt7668(&dev->mt76)) {
+		mt7615_mac_init(dev);
+		mt7615_phy_init(dev);
+		mt76_connac_mcu_del_wtbl_all(&dev->mt76);
+	}
 	mt7615_check_offload_capability(dev);
 }
 EXPORT_SYMBOL_GPL(mt7615_init_work);

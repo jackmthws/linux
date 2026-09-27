@@ -312,6 +312,14 @@ int mt7663_usb_sdio_register_device(struct mt7615_dev *dev)
 	INIT_LIST_HEAD(&dev->wrd_head);
 	mt7615_init_device(dev);
 
+	if (dev->early_mcu_init) {
+		/* rx processing is needed for the mcu responses */
+		set_bit(MT76_STATE_INITIALIZED, &dev->mphy.state);
+		err = dev->early_mcu_init(dev);
+		if (err)
+			return err;
+	}
+
 	err = mt7663_usb_sdio_init_hardware(dev);
 	if (err)
 		return err;

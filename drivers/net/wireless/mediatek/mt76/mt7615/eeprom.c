@@ -50,6 +50,24 @@ static int mt7615_efuse_init(struct mt7615_dev *dev, u32 base)
 	if (is_mt7663(&dev->mt76))
 		len = MT7663_EEPROM_SIZE;
 
+	if (is_mt7668(&dev->mt76)) {
+		/* the efuse is only accessible through the firmware */
+		dev->mt76.otp.data = devm_kzalloc(dev->mt76.dev, len, GFP_KERNEL);
+		dev->mt76.otp.size = len;
+		if (!dev->mt76.otp.data)
+			return -ENOMEM;
+
+		buf = dev->mt76.otp.data;
+		for (i = 0; i + 16 <= len; i += 16) {
+			int ret = mt7668_mcu_efuse_read(dev, i, buf + i);
+
+			if (ret)
+				return ret;
+		}
+
+		return 0;
+	}
+
 	val = mt76_rr(dev, base + MT_EFUSE_BASE_CTRL);
 	if (val & MT_EFUSE_BASE_CTRL_EMPTY)
 		return 0;
@@ -103,7 +121,7 @@ mt7615_eeprom_parse_hw_band_cap(struct mt7615_dev *dev)
 {
 	u8 val, *eeprom = dev->mt76.eeprom.data;
 
-	if (is_mt7663(&dev->mt76)) {
+	if (is_mt7663(&dev->mt76) || is_mt7668(&dev->mt76)) {
 		/* dual band */
 		dev->mphy.cap.has_2ghz = true;
 		dev->mphy.cap.has_5ghz = true;
@@ -152,6 +170,10 @@ static void mt7615_eeprom_parse_hw_cap(struct mt7615_dev *dev)
 		max_nss = 2;
 		tx_mask = FIELD_GET(MT_EE_HW_CONF1_TX_MASK,
 				    eeprom[MT7663_EE_HW_CONF1]);
+	} else if (is_mt7668(&dev->mt76)) {
+		max_nss = 2;
+		tx_mask = FIELD_GET(MT_EE_NIC_CONF_TX_MASK,
+				    eeprom[MT_EE_NIC_CONF_0]);
 	} else {
 		u32 val;
 
