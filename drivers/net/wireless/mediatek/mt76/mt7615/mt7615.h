@@ -155,6 +155,8 @@ struct mt7615_vif {
 	struct mt76_vif_link mt76; /* must be first */
 	struct mt7615_sta sta;
 	bool sta_added;
+
+	struct ieee80211_tx_queue_params wmm[IEEE80211_NUM_ACS];
 };
 
 struct mib_stats {
@@ -199,6 +201,14 @@ struct mt7615_phy {
 
 	struct sk_buff_head scan_event_list;
 	struct delayed_work scan_work;
+
+	/* MT7668: channel grant requested for a join, not a roc */
+	bool join_chan;
+
+	/* MT7668: hw scans are split into firmware requests of 32 channels */
+	struct ieee80211_scan_request *scan_req;
+	struct ieee80211_vif *scan_vif;
+	int scan_chan_idx;
 
 	struct work_struct roc_work;
 	struct timer_list roc_timer;
@@ -295,6 +305,10 @@ struct mt7615_dev {
 	u16 ee_buf_start;
 	u16 ee_buf_len;
 
+	/* MT7668: rx block ack events, handled outside of the rx path */
+	struct sk_buff_head ba_event_list;
+	struct work_struct ba_work;
+
 	struct work_struct rate_work;
 	struct list_head wrd_head;
 
@@ -370,11 +384,17 @@ mt7615_ext_phy(struct mt7615_dev *dev)
 
 extern struct ieee80211_rate mt7615_rates[12];
 extern const struct ieee80211_ops mt7615_ops;
+extern const struct mt7615_mcu_ops mt7668_mcu_ops;
+void mt7668_init_ops(struct ieee80211_ops *ops);
+bool mt7668_scan_next(struct mt7615_phy *phy);
 int mt7668_mcu_efuse_read(struct mt7615_dev *dev, u32 offset, u8 *data);
 int mt7668_mcu_basic_config(struct mt7615_dev *dev);
 int mt7668_mcu_power_off(struct mt7615_dev *dev);
+int mt7668_mcu_set_regd(struct mt76_phy *phy);
 int mt7668_reverse_hdr_trans(struct sk_buff *skb, u16 hdr_gap);
 int mt7668_tx_to_8023(struct sk_buff *skb);
+bool mt7668_mcu_rx_event(struct mt7615_dev *dev, struct sk_buff *skb);
+void mt7668_ba_work(struct work_struct *work);
 void mt7668_mac_write_txwi_8023(struct mt7615_dev *dev, __le32 *txwi,
 				struct sk_buff *skb, struct mt76_wcid *wcid,
 				struct ieee80211_vif *vif,

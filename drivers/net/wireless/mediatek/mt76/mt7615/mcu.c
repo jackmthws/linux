@@ -480,9 +480,16 @@ mt7615_mcu_roc_event(struct mt7615_dev *dev, struct sk_buff *skb)
 	else
 		mphy = &dev->mt76.phy;
 
+	phy = mphy->priv;
+	/* channel grants for a connection are not remain-on-channel */
+	if (phy->join_chan) {
+		phy->roc_grant = true;
+		wake_up(&phy->roc_wait);
+		return;
+	}
+
 	ieee80211_ready_on_channel(mphy->hw);
 
-	phy = mphy->priv;
 	phy->roc_grant = true;
 	wake_up(&phy->roc_wait);
 
@@ -536,6 +543,9 @@ static void
 mt7615_mcu_rx_unsolicited_event(struct mt7615_dev *dev, struct sk_buff *skb)
 {
 	struct mt7615_mcu_rxd *rxd = (struct mt7615_mcu_rxd *)skb->data;
+
+	if (is_mt7668(&dev->mt76) && mt7668_mcu_rx_event(dev, skb))
+		return;
 
 	switch (rxd->eid) {
 	case MCU_EVENT_EXT:
@@ -1468,6 +1478,7 @@ int mt7668_load_firmware(struct mt7615_dev *dev)
 
 	/* the MT7668 STA firmware offloads scan, roc and power save */
 	dev->fw_ver = MT7615_FIRMWARE_V3;
+	dev->mcu_ops = &mt7668_mcu_ops;
 
 	return 0;
 }

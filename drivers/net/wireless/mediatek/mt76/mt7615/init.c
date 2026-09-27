@@ -347,6 +347,12 @@ mt7615_regd_notifier(struct wiphy *wiphy,
 
 	mt7615_mutex_acquire(dev);
 
+	if (is_mt7668(&dev->mt76)) {
+		/* station only firmware, no radar detection */
+		mt7668_mcu_set_regd(mphy);
+		goto out;
+	}
+
 	if (chandef->chan->flags & IEEE80211_CHAN_RADAR)
 		mt7615_dfs_init_radar_detector(phy);
 
@@ -355,6 +361,7 @@ mt7615_regd_notifier(struct wiphy *wiphy,
 		mt76_connac_mcu_set_rate_txpower(mphy);
 	}
 
+out:
 	mt7615_mutex_release(dev);
 }
 
@@ -378,7 +385,10 @@ mt7615_init_wiphy(struct ieee80211_hw *hw)
 	hw->sta_data_size = sizeof(struct mt7615_sta);
 	hw->vif_data_size = sizeof(struct mt7615_vif);
 
-	if (is_mt7663(&phy->dev->mt76)) {
+	if (is_mt7668(&phy->dev->mt76)) {
+		/* the station firmware can not beacon */
+		wiphy->interface_modes = BIT(NL80211_IFTYPE_STATION);
+	} else if (is_mt7663(&phy->dev->mt76)) {
 		wiphy->iface_combinations = if_comb;
 		wiphy->n_iface_combinations = ARRAY_SIZE(if_comb);
 	} else {
@@ -394,17 +404,26 @@ mt7615_init_wiphy(struct ieee80211_hw *hw)
 	wiphy->max_sched_scan_ssids = MT76_CONNAC_MAX_SCHED_SCAN_SSID;
 	wiphy->max_match_sets = MT76_CONNAC_MAX_SCAN_MATCH;
 	wiphy->max_sched_scan_reqs = 1;
+	if (is_mt7668(&phy->dev->mt76)) {
+		/* no scheduled scan support in the gen3 firmware */
+		wiphy->max_sched_scan_reqs = 0;
+		wiphy->max_sched_scan_ssids = 0;
+		wiphy->max_sched_scan_ie_len = 0;
+		wiphy->max_match_sets = 0;
+	}
 	wiphy->max_scan_ssids = 4;
 
 	wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_SET_SCAN_DWELL);
 	wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_VHT_IBSS);
 	wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_CAN_REPLACE_PTK0);
-	if (!is_mt7622(&phy->dev->mt76))
+	if (!is_mt7622(&phy->dev->mt76) && !is_mt7668(&phy->dev->mt76))
 		wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_MU_MIMO_AIR_SNIFFER);
 
 	ieee80211_hw_set(hw, SINGLE_SCAN_ON_ALL_BANDS);
 	ieee80211_hw_set(hw, TX_STATUS_NO_AMPDU_LEN);
-	ieee80211_hw_set(hw, WANT_MONITOR_VIF);
+	/* the MT7668 firmware has no sniffer mode */
+	if (!is_mt7668(&phy->dev->mt76))
+		ieee80211_hw_set(hw, WANT_MONITOR_VIF);
 	ieee80211_hw_set(hw, SUPPORTS_RX_DECAP_OFFLOAD);
 	ieee80211_hw_set(hw, SUPPORTS_VHT_EXT_NSS_BW);
 	if (is_mt7668(&phy->dev->mt76)) {
@@ -638,6 +657,8 @@ void mt7615_init_device(struct mt7615_dev *dev)
 	INIT_DELAYED_WORK(&dev->phy.scan_work, mt7615_scan_work);
 	INIT_DELAYED_WORK(&dev->coredump.work, mt7615_coredump_work);
 	skb_queue_head_init(&dev->phy.scan_event_list);
+	skb_queue_head_init(&dev->ba_event_list);
+	INIT_WORK(&dev->ba_work, mt7668_ba_work);
 	skb_queue_head_init(&dev->coredump.msg_list);
 	init_waitqueue_head(&dev->reset_wait);
 	init_waitqueue_head(&dev->phy.roc_wait);

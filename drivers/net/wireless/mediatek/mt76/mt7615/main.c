@@ -30,12 +30,20 @@ static int mt7615_start(struct ieee80211_hw *hw)
 	struct mt7615_phy *phy = mt7615_hw_phy(hw);
 	unsigned long timeout;
 	bool running;
-	int ret;
+	int ret = 0;
 
 	if (!mt7615_wait_for_mcu_init(dev))
 		return -EIO;
 
 	mt7615_mutex_acquire(dev);
+
+	/* the MT7668 firmware manages the MAC and channel on its own */
+	if (is_mt7668(&dev->mt76)) {
+		ret = mt7668_mcu_set_regd(phy->mt76);
+		if (!ret)
+			set_bit(MT76_STATE_RUNNING, &phy->mt76->state);
+		goto out;
+	}
 
 	running = mt7615_dev_running(dev);
 
@@ -117,7 +125,7 @@ static void mt7615_stop(struct ieee80211_hw *hw, bool suspend)
 		mt76_connac_mcu_set_mac_enable(&dev->mt76, 1, false, false);
 	}
 
-	if (!mt7615_dev_running(dev)) {
+	if (!mt7615_dev_running(dev) && !is_mt7668(&dev->mt76)) {
 		mt7615_mcu_set_pm(dev, 0, 1);
 		mt76_connac_mcu_set_mac_enable(&dev->mt76, 0, false, false);
 	}
@@ -208,7 +216,8 @@ static int mt7615_add_interface(struct ieee80211_hw *hw,
 	mvif->mt76.omac_idx = idx;
 
 	mvif->mt76.band_idx = ext_phy;
-	mvif->mt76.wmm_idx = vif->type != NL80211_IFTYPE_AP;
+	mvif->mt76.wmm_idx = vif->type != NL80211_IFTYPE_AP &&
+			     !is_mt7668(&dev->mt76);
 	mvif->mt76.wcid = &mvif->sta.wcid;
 	if (ext_phy)
 		mvif->mt76.wmm_idx += 2;
@@ -217,19 +226,33 @@ static int mt7615_add_interface(struct ieee80211_hw *hw,
 	dev->omac_mask |= BIT_ULL(mvif->mt76.omac_idx);
 	phy->omac_mask |= BIT_ULL(mvif->mt76.omac_idx);
 
-	ret = mt7615_mcu_set_dbdc(dev);
-	if (ret)
-		goto out;
+	if (!is_mt7668(&dev->mt76)) {
+		ret = mt7615_mcu_set_dbdc(dev);
+		if (ret)
+			goto out;
+	}
 
-	idx = MT7615_WTBL_RESERVED - mvif->mt76.idx;
+	if (is_mt7668(&dev->mt76)) {
+		/* the firmware expects the group entry to be allocated
+		 * like any other WTBL entry
+		 */
+		idx = mt76_wcid_alloc(dev->mt76.wcid_mask, MT7615_WTBL_STA - 1);
+		if (idx < 0) {
+			ret = -ENOSPC;
+			goto out;
+		}
+	} else {
+		idx = MT7615_WTBL_RESERVED - mvif->mt76.idx;
+	}
 
 	INIT_LIST_HEAD(&mvif->sta.wcid.poll_list);
 	mvif->sta.vif = mvif;
 	mvif->sta.wcid.idx = idx;
 	mt76_wcid_init(&mvif->sta.wcid, mvif->mt76.band_idx);
 
-	mt7615_mac_wtbl_update(dev, idx,
-			       MT_WTBL_UPDATE_ADM_COUNT_CLEAR);
+	if (!is_mt7668(&dev->mt76))
+		mt7615_mac_wtbl_update(dev, idx,
+				       MT_WTBL_UPDATE_ADM_COUNT_CLEAR);
 
 	rcu_assign_pointer(dev->mt76.wcid[idx], &mvif->sta.wcid);
 	if (vif->txq) {
@@ -267,6 +290,8 @@ static void mt7615_remove_interface(struct ieee80211_hw *hw,
 	mt7615_mcu_add_dev_info(phy, vif, false);
 
 	rcu_assign_pointer(dev->mt76.wcid[idx], NULL);
+	if (is_mt7668(&dev->mt76))
+		mt76_wcid_mask_clear(dev->mt76.wcid_mask, idx);
 
 	dev->mt76.vif_mask &= ~BIT_ULL(mvif->mt76.idx);
 	dev->omac_mask &= ~BIT_ULL(mvif->mt76.omac_idx);
@@ -664,8 +689,9 @@ int mt7615_mac_sta_add(struct mt76_dev *mdev, struct ieee80211_vif *vif,
 			return err;
 	}
 
-	mt7615_mac_wtbl_update(dev, idx,
-			       MT_WTBL_UPDATE_ADM_COUNT_CLEAR);
+	if (!is_mt7668(&dev->mt76))
+		mt7615_mac_wtbl_update(dev, idx,
+				       MT_WTBL_UPDATE_ADM_COUNT_CLEAR);
 	err = mt7615_mcu_sta_add(&dev->phy, vif, sta, true);
 	if (err)
 		return err;
@@ -690,8 +716,9 @@ void mt7615_mac_sta_remove(struct mt76_dev *mdev, struct ieee80211_vif *vif,
 	mt76_connac_pm_wake(phy->mt76, &dev->pm);
 
 	mt7615_mcu_sta_add(&dev->phy, vif, sta, false);
-	mt7615_mac_wtbl_update(dev, msta->wcid.idx,
-			       MT_WTBL_UPDATE_ADM_COUNT_CLEAR);
+	if (!is_mt7668(&dev->mt76))
+		mt7615_mac_wtbl_update(dev, msta->wcid.idx,
+				       MT_WTBL_UPDATE_ADM_COUNT_CLEAR);
 	if (vif->type == NL80211_IFTYPE_STATION && !sta->tdls)
 		mt7615_mcu_add_bss_info(phy, vif, sta, false);
 
@@ -1076,6 +1103,8 @@ void mt7615_scan_work(struct work_struct *work)
 		rxd = (struct mt7615_mcu_rxd *)skb->data;
 		if (rxd->eid == MCU_EVENT_SCHED_SCAN_DONE) {
 			ieee80211_sched_scan_results(phy->mt76->hw);
+		} else if (is_mt7668(&phy->dev->mt76) && mt7668_scan_next(phy)) {
+			/* next chunk of the channel list is in flight */
 		} else if (test_and_clear_bit(MT76_HW_SCANNING,
 					      &phy->mt76->state)) {
 			struct cfg80211_scan_info info = {

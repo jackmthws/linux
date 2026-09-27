@@ -2011,6 +2011,12 @@ void mt7615_update_channel(struct mt76_phy *mphy)
 {
 	struct mt7615_dev *dev = container_of(mphy->dev, struct mt7615_dev, mt76);
 
+	/* the MT7668 firmware can not access the MIB counters on behalf of
+	 * the host
+	 */
+	if (is_mt7668(&dev->mt76))
+		return;
+
 	if (mt76_connac_pm_wake(&dev->mphy, &dev->pm))
 		return;
 
