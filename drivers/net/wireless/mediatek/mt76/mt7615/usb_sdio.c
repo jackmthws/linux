@@ -46,11 +46,12 @@ mt7663_usb_sdio_write_txwi(struct mt7615_dev *dev, struct mt76_wcid *wcid,
 			   struct ieee80211_key_conf *key, int pid,
 			   struct sk_buff *skb)
 {
-	__le32 *txwi = (__le32 *)(skb->data - MT_USB_TXD_SIZE);
+	int txd_size = mt7615_usb_sdio_txd_size(dev, skb);
+	__le32 *txwi = (__le32 *)(skb->data - txd_size);
 
-	memset(txwi, 0, MT_USB_TXD_SIZE);
+	memset(txwi, 0, txd_size);
 	mt7615_mac_write_txwi(dev, txwi, skb, wcid, sta, pid, key, qid, false);
-	skb_push(skb, MT_USB_TXD_SIZE);
+	skb_push(skb, txd_size);
 }
 
 static int mt7663_usb_sdio_set_rates(struct mt7615_dev *dev,
@@ -168,7 +169,8 @@ EXPORT_SYMBOL_GPL(mt7663_usb_sdio_tx_status_data);
 void mt7663_usb_sdio_tx_complete_skb(struct mt76_dev *mdev,
 				     struct mt76_queue_entry *e)
 {
-	unsigned int headroom = MT_USB_TXD_SIZE;
+	struct mt7615_dev *dev = container_of(mdev, struct mt7615_dev, mt76);
+	unsigned int headroom = mt7615_usb_sdio_txd_size(dev, e->skb);
 
 	if (mt76_is_usb(mdev))
 		headroom += MT_USB_HDR_SIZE;
@@ -193,6 +195,12 @@ int mt7663_usb_sdio_tx_prepare_skb(struct mt76_dev *mdev, void *txwi_ptr,
 	msta = wcid ? container_of(wcid, struct mt7615_sta, wcid) : NULL;
 	if (!wcid)
 		wcid = &dev->mt76.global_wcid;
+
+	if (is_mt7668(mdev)) {
+		err = mt7668_tx_to_8023(skb);
+		if (err)
+			return err;
+	}
 
 	if ((info->flags & IEEE80211_TX_CTL_RATE_CTRL_PROBE) &&
 	    msta && !msta->rate_probe) {
@@ -324,7 +332,8 @@ int mt7663_usb_sdio_register_device(struct mt7615_dev *dev)
 	if (err)
 		return err;
 
-	hw->extra_tx_headroom += MT_USB_TXD_SIZE;
+	hw->extra_tx_headroom += is_mt7668(&dev->mt76) ? MT7668_TXD_DATA_SIZE :
+							 MT_USB_TXD_SIZE;
 	if (mt76_is_usb(&dev->mt76)) {
 		hw->extra_tx_headroom += MT_USB_HDR_SIZE;
 		/* check hw sg support in order to enable AMSDU */

@@ -146,6 +146,9 @@ struct mt7615_sta {
 	u8 n_rates;
 
 	u8 rate_probe;
+
+	/* MT7668: last received sequence control per tid */
+	u16 rx_last_seq[IEEE80211_NUM_TIDS];
 };
 
 struct mt7615_vif {
@@ -370,6 +373,13 @@ extern const struct ieee80211_ops mt7615_ops;
 int mt7668_mcu_efuse_read(struct mt7615_dev *dev, u32 offset, u8 *data);
 int mt7668_mcu_basic_config(struct mt7615_dev *dev);
 int mt7668_mcu_power_off(struct mt7615_dev *dev);
+int mt7668_reverse_hdr_trans(struct sk_buff *skb, u16 hdr_gap);
+int mt7668_tx_to_8023(struct sk_buff *skb);
+void mt7668_mac_write_txwi_8023(struct mt7615_dev *dev, __le32 *txwi,
+				struct sk_buff *skb, struct mt76_wcid *wcid,
+				struct ieee80211_vif *vif,
+				struct ieee80211_key_conf *key, int pid,
+				enum mt76_txq_id qid);
 extern const u32 mt7615e_reg_map[__MT_BASE_MAX];
 extern const u32 mt7663e_reg_map[__MT_BASE_MAX];
 extern const u32 mt7663_usb_sdio_reg_map[__MT_BASE_MAX];
@@ -438,6 +448,27 @@ static inline u16 mt7615_wtbl_size(struct mt7615_dev *dev)
 		return MT7663_WTBL_SIZE;
 	else
 		return MT7615_WTBL_SIZE;
+}
+
+/* On MT7668 SDIO, frames for the MCU port (management) carry the plain 32
+ * byte TXD, 802.3 data frames for the LMAC carry the TXD plus a 44 byte
+ * append that is consumed by the CR4.
+ */
+#define MT7668_TXD_APPEND_SIZE		44
+#define MT7668_TXD_DATA_SIZE		(MT_TXD_SIZE + MT7668_TXD_APPEND_SIZE)
+
+static inline int mt7615_usb_sdio_txd_size(struct mt7615_dev *dev,
+					   struct sk_buff *skb)
+{
+	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
+
+	if (!is_mt7668(&dev->mt76))
+		return MT_USB_TXD_SIZE;
+
+	if (info->flags & IEEE80211_TX_CTL_HW_80211_ENCAP)
+		return MT7668_TXD_DATA_SIZE;
+
+	return MT_TXD_SIZE;
 }
 
 #define mt7615_mutex_acquire(dev)	\

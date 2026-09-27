@@ -407,6 +407,12 @@ mt7615_init_wiphy(struct ieee80211_hw *hw)
 	ieee80211_hw_set(hw, WANT_MONITOR_VIF);
 	ieee80211_hw_set(hw, SUPPORTS_RX_DECAP_OFFLOAD);
 	ieee80211_hw_set(hw, SUPPORTS_VHT_EXT_NSS_BW);
+	if (is_mt7668(&phy->dev->mt76)) {
+		/* the MT7668 CR4 expects 802.3 data frames */
+		ieee80211_hw_set(hw, SUPPORTS_TX_ENCAP_OFFLOAD);
+		/* rate control runs in firmware */
+		ieee80211_hw_set(hw, HAS_RATE_CONTROL);
+	}
 
 	if (is_mt7615(&phy->dev->mt76))
 		hw->max_tx_fragments = MT_TXP_MAX_BUF_NUM;

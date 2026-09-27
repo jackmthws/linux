@@ -94,8 +94,11 @@ static struct mt76_wcid *mt7615_rx_get_wcid(struct mt7615_dev *dev,
 	if (unicast || !wcid)
 		return wcid;
 
+	/* the MT7668 firmware reports group addressed frames on the group
+	 * entry of the interface
+	 */
 	if (!wcid->sta)
-		return NULL;
+		return is_mt7668(&dev->mt76) ? wcid : NULL;
 
 	sta = container_of(wcid, struct mt7615_sta, wcid);
 	if (!sta->vif)
@@ -589,7 +592,17 @@ static int mt7615_mac_fill_rx(struct mt7615_dev *dev, struct sk_buff *skb)
 	}
 
 	hdr_gap = (u8 *)rxd - skb->data + 2 * remove_pad;
-	if (hdr_trans && ieee80211_has_morefrags(fc)) {
+	/* The MT7668 firmware always translates data frames to 802.3, turn
+	 * them back into 802.11 until mac80211 enables decap offload for the
+	 * station (e.g. for EAPOL frames before the port is authorized).
+	 */
+	if (hdr_trans && is_mt7668(&dev->mt76) &&
+	    !(status->wcid && status->wcid->sta &&
+	      test_bit(MT_WCID_FLAG_HDR_TRANS, &status->wcid->flags))) {
+		if (mt7668_reverse_hdr_trans(skb, hdr_gap))
+			return -EINVAL;
+		hdr_trans = false;
+	} else if (hdr_trans && ieee80211_has_morefrags(fc)) {
 		if (mt7615_reverse_frag0_hdr_trans(skb, hdr_gap))
 			return -EINVAL;
 		hdr_trans = false;
@@ -636,6 +649,21 @@ static int mt7615_mac_fill_rx(struct mt7615_dev *dev, struct sk_buff *skb)
 		}
 	} else {
 		status->flag |= RX_FLAG_8023;
+	}
+
+	/* The MT7668 firmware does not drop duplicates, which mac80211
+	 * expects to be done in hardware for 802.3 frames.
+	 */
+	if (hdr_trans && is_mt7668(&dev->mt76) && unicast && status->wcid &&
+	    status->wcid->sta && ieee80211_is_data_qos(fc)) {
+		struct mt7615_sta *msta;
+		u8 tid = qos_ctl & IEEE80211_QOS_CTL_TID_MASK;
+
+		msta = container_of(status->wcid, struct mt7615_sta, wcid);
+		if (ieee80211_has_retry(fc) &&
+		    msta->rx_last_seq[tid] == seq_ctrl)
+			return -EINVAL;
+		msta->rx_last_seq[tid] = seq_ctrl;
 	}
 
 	if (!status->wcid || !ieee80211_is_data_qos(fc))
@@ -717,14 +745,24 @@ int mt7615_mac_write_txwi(struct mt7615_dev *dev, __le32 *txwi,
 	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
 	struct ieee80211_tx_rate *rate = &info->control.rates[0];
 	u8 phy_idx = (info->hw_queue & MT_TX_HW_QUEUE_PHY) >> 2;
-	bool multicast = is_multicast_ether_addr(hdr->addr1);
+	bool multicast;
 	struct ieee80211_vif *vif = info->control.vif;
 	bool is_mmio = mt76_is_mmio(&dev->mt76);
-	u32 val, sz_txd = is_mmio ? MT_TXD_SIZE : MT_USB_TXD_SIZE;
+	u32 val, sz_txd = is_mmio ? MT_TXD_SIZE :
+			  mt7615_usb_sdio_txd_size(dev, skb);
 	struct mt76_phy *mphy = &dev->mphy;
-	__le16 fc = hdr->frame_control;
 	int tx_count = 8;
 	u16 seqno = 0;
+	__le16 fc;
+
+	if (info->flags & IEEE80211_TX_CTL_HW_80211_ENCAP) {
+		mt7668_mac_write_txwi_8023(dev, txwi, skb, wcid, vif, key, pid,
+					   qid);
+		return 0;
+	}
+
+	fc = hdr->frame_control;
+	multicast = is_multicast_ether_addr(hdr->addr1);
 
 	if (vif) {
 		struct mt76_vif_link *mvif = (struct mt76_vif_link *)vif->drv_priv;
@@ -733,7 +771,8 @@ int mt7615_mac_write_txwi(struct mt7615_dev *dev, __le32 *txwi,
 		wmm_idx = mvif->wmm_idx;
 	}
 
-	if (sta) {
+	/* MT7668 rate control runs in firmware, rate_count is unused */
+	if (sta && !is_mt7668(&dev->mt76)) {
 		struct mt7615_sta *msta = (struct mt7615_sta *)sta->drv_priv;
 
 		tx_count = msta->rate_count;
@@ -752,14 +791,26 @@ int mt7615_mac_write_txwi(struct mt7615_dev *dev, __le32 *txwi,
 		p_fmt = is_mmio ? MT_TX_TYPE_CT : MT_TX_TYPE_SF;
 		q_idx = phy_idx ? MT_LMAC_ALTX1 : MT_LMAC_ALTX0;
 	} else {
-		p_fmt = is_mmio ? MT_TX_TYPE_CT : MT_TX_TYPE_SF;
+		/* the MT7668 CR4 takes data frames cut-through with the append */
+		p_fmt = is_mmio || is_mt7668(&dev->mt76) ? MT_TX_TYPE_CT :
+							  MT_TX_TYPE_SF;
 		q_idx = wmm_idx * MT7615_MAX_WMM_SETS +
 			mt7615_lmac_mapping(dev, skb_get_queue_mapping(skb));
 	}
 
-	val = FIELD_PREP(MT_TXD0_TX_BYTES, skb->len + sz_txd) |
-	      FIELD_PREP(MT_TXD0_P_IDX, MT_TX_PORT_IDX_LMAC) |
-	      FIELD_PREP(MT_TXD0_Q_IDX, q_idx);
+	val = FIELD_PREP(MT_TXD0_TX_BYTES, skb->len + sz_txd);
+	if (is_mt7668(&dev->mt76) && !beacon &&
+	    !ieee80211_is_data_present(fc)) {
+		/* the MT7668 data path only takes 802.3 frames, management
+		 * and null data frames are transmitted by the firmware
+		 */
+		p_fmt = MT_TX_TYPE_CMD;
+		val |= FIELD_PREP(MT_TXD0_P_IDX, MT_TX_PORT_IDX_MCU) |
+		       FIELD_PREP(MT_TXD0_Q_IDX, MT_TX_MCU_PORT_RX_Q1);
+	} else {
+		val |= FIELD_PREP(MT_TXD0_P_IDX, MT_TX_PORT_IDX_LMAC) |
+		       FIELD_PREP(MT_TXD0_Q_IDX, q_idx);
+	}
 	txwi[0] = cpu_to_le32(val);
 
 	val = MT_TXD1_LONG_FORMAT |
@@ -855,11 +906,19 @@ int mt7615_mac_write_txwi(struct mt7615_dev *dev, __le32 *txwi,
 	if (info->flags & IEEE80211_TX_CTL_NO_ACK)
 		txwi[3] |= cpu_to_le32(MT_TXD3_NO_ACK);
 
-	val = FIELD_PREP(MT_TXD7_TYPE, fc_type) |
-	      FIELD_PREP(MT_TXD7_SUB_TYPE, fc_stype) |
-	      FIELD_PREP(MT_TXD7_SPE_IDX, 0x18);
+	if (is_mt7668(&dev->mt76)) {
+		/* the MT7668 firmware drops frames sent with the default
+		 * SPE index, and the upper half of dword 7 has a different
+		 * meaning on it
+		 */
+		val = FIELD_PREP(MT_TXD7_SPE_IDX, 0);
+	} else {
+		val = FIELD_PREP(MT_TXD7_TYPE, fc_type) |
+		      FIELD_PREP(MT_TXD7_SUB_TYPE, fc_stype) |
+		      FIELD_PREP(MT_TXD7_SPE_IDX, 0x18);
+	}
 	txwi[7] = cpu_to_le32(val);
-	if (!is_mmio) {
+	if (!is_mmio && !is_mt7668(&dev->mt76)) {
 		val = FIELD_PREP(MT_TXD8_L_TYPE, fc_type) |
 		      FIELD_PREP(MT_TXD8_L_SUB_TYPE, fc_stype);
 		txwi[8] = cpu_to_le32(val);

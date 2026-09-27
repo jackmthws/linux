@@ -224,6 +224,7 @@ static int mt7615_add_interface(struct ieee80211_hw *hw,
 	idx = MT7615_WTBL_RESERVED - mvif->mt76.idx;
 
 	INIT_LIST_HEAD(&mvif->sta.wcid.poll_list);
+	mvif->sta.vif = mvif;
 	mvif->sta.wcid.idx = idx;
 	mt76_wcid_init(&mvif->sta.wcid, mvif->mt76.band_idx);
 
@@ -643,6 +644,8 @@ int mt7615_mac_sta_add(struct mt76_dev *mdev, struct ieee80211_vif *vif,
 	idx = mt76_wcid_alloc(dev->mt76.wcid_mask, MT7615_WTBL_STA - 1);
 	if (idx < 0)
 		return -ENOSPC;
+
+	memset(msta->rx_last_seq, 0xff, sizeof(msta->rx_last_seq));
 
 	INIT_LIST_HEAD(&msta->wcid.poll_list);
 	msta->vif = mvif;
